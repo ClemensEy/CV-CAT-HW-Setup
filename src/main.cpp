@@ -25,26 +25,26 @@ GPI EXPANDER https://wolles-elektronikkiste.de/en/port-expander-mcp23017-2
 #include <NeoPixelBus.h>
 #include <SPI.h>
 #include <MCP23S18.h>
-#include <U8g2lib.h> //display
-#include <Wire.h> //i2c für display
+#include <MCP3x6x.h>
 
-#define CS_PIN 16   // Chip Select - Pin 16 on gateway - 4 on wt32 //TODO: CS wofür?
-/* A hardware reset is performed during init(). If you want to save a pin you can define a dummy 
- * reset pin >= 99 and connect the reset pin to HIGH. This will trigger a software reset instead 
- * of a hardware reset. 
- */
+
 #define RESET_PIN 99
 #define MCP_SPI_CTRL_BYTE 0x20 // Do not change
 
-#define SCK  14
-#define MISO 12
-#define MOSI  15
+#define SCK  2 //14
+#define MISO 36 //12
+#define MOSI  5 //15
 #define EXP_CS 16
 #define DAC_CS 4 //DAC SYNC Pin
-#define I2C_SDA 2   //Display
-#define I2C_SCL 13     //Display
+
  
 #define colorSaturation 128
+
+
+//ADC
+#define MCP3x6x_DEBUG 0
+#define ADC_pinCS 32
+#define ADC_IRQ 34
 
 const uint16_t PixelCount = 16; // this example assumes 4 pixels, making it smaller will cause a failure
 const uint8_t PixelPin = 33;  // make sure to set this to the correct pin, ignored for Esp8266
@@ -56,7 +56,6 @@ unsigned int four;
 
 unsigned long message;
 
-U8G2_SSD1306_64X32_1F_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE); // DISPLAY
 
 
 // three element pixels, in different order and speeds
@@ -76,9 +75,13 @@ HslColor hslBlue(blue);
 HslColor hslWhite(white);
 HslColor hslBlack(black);
 
+//ADC
+MCP3464 mcp(ADC_pinCS, &SPI); //only ADC_CS as argument?
+
+//Buttons
 /* There are two ways to create your MCP23S18 object:
- * MCP23S18 myMCP = MCP23S18(CS_PIN, RESET_PIN, MCP_CTRL_BYTE);
- * MCP23S18 myMCP = MCP23S18(&SPI, CS_PIN, RESET_PIN, MCP_CTRL_BYTE);
+ * MCP23S18 myMCP = MCP23S18(EXP_CS, RESET_PIN, MCP_CTRL_BYTE);
+ * MCP23S18 myMCP = MCP23S18(&SPI, EXP_CS, RESET_PIN, MCP_CTRL_BYTE);
  * The second option allows you to pass SPI objects, e.g. in order to
  * use two SPI interfaces on the ESP32.
  */
@@ -87,7 +90,11 @@ MCP23S18 myMCP = MCP23S18(&SPI, EXP_CS, RESET_PIN, MCP_SPI_CTRL_BYTE);
 int wT = 500; // wT = waiting time
 byte buttons = 0b00000000;
 
-
+/// The Message that is eventually serialized and transmitted to the DAC
+/// The input shift register (SR) of the DAC7568, DAC8168, and DAC8568
+/// is 32 bits wide, and consists of four Prefix bits (DB31 to DB28),
+/// four control bits (DB27 to DB24), 16 databits (DB23 to DB4),
+/// and four additional feature bits. The 16 databits comprise the 16-, 14-, or 12-bit input code
 void DAC8568Write(unsigned int prefix, unsigned int control, unsigned int address, unsigned int data, unsigned int feature) {
  
   message = (prefix << 28) | (control << 24) | (address << 20) | (data << 4) | (feature);
@@ -97,14 +104,21 @@ void DAC8568Write(unsigned int prefix, unsigned int control, unsigned int addres
   digitalWrite(DAC_CS,HIGH); 
 }
 
+
+/// Get software reset message
+    /// 8.2.10 Software Reset Function
+    /// The DAC7568, DAC8168, and DAC8568 contain a software reset feature.
+    /// If the software reset feature is executed, all registers inside the device are reset to default settings; that is,
+    /// all DAC channels are reset to the power-on reset code (power on reset to zero scale for grades A and C; power on reset to midscale for grades B and D).
 void DAC8568Reset()
 {
+  
   DAC8568Write(0b0001, 0b1100, 0x00, 0x00, 0x00) ;
 }
 
 void DAC8568InternalRef()
 {
-  DAC8568Write(0x00, 0x08, 0x00, 0x0000, 0x01) ;
+  DAC8568Write(0x00, 0x08, 0x00, 0x0000, 0x01) ; 
 }
 
 void DAC8568SetVoltage(unsigned int channel,unsigned int voltage)
@@ -112,11 +126,23 @@ void DAC8568SetVoltage(unsigned int channel,unsigned int voltage)
   DAC8568Write(0, 3, channel, voltage, 0) ;
 }
 
+void mcp_wrapper() { 
+
+  mcp.IRQ_handler(); }
+
+
 void setup()
 {
+  unsigned int i;
+  unsigned int j;
+  pinMode(EXP_CS, INPUT);
+  pinMode(ADC_IRQ, INPUT);
+  attachInterrupt(digitalPinToInterrupt(ADC_IRQ), mcp_wrapper, FALLING);
+
   pinMode(EXP_CS, OUTPUT);
   SPI.begin(SCK, MISO, MOSI, DAC_CS); //EXP_CS
-
+  pinMode(ADC_pinCS, OUTPUT);
+  digitalWrite(ADC_pinCS, HIGH);
   pinMode (DAC_CS, OUTPUT);
   digitalWrite(DAC_CS, HIGH);
   SPI.beginTransaction(SPISettings(48000000, MSBFIRST, SPI_MODE1));
@@ -128,11 +154,10 @@ void setup()
   SPI.endTransaction();
 
 
-  Serial.begin(115200);
-  Wire.begin(I2C_SDA, I2C_SCL);
-    u8g2.begin();
 
-  
+
+  Serial.begin(115200);
+
   delay(5000);
 
   networkManager.begin();
@@ -149,6 +174,7 @@ void setup()
 
     // set the colors, 
     // if they don't match in order, you need to use NeoGrbFeature feature
+    
     strip.SetPixelColor(0, red);
     strip.SetPixelColor(1, green);
     strip.SetPixelColor(2, blue);
@@ -165,6 +191,7 @@ void setup()
     strip.SetPixelColor(13, green);
     strip.SetPixelColor(14, blue);
     strip.SetPixelColor(15, white);
+    
     // the following line demonstrates rgbw color support
     // if the NeoPixels are rgbw types the following line will compile
     // if the NeoPixels are anything else, the following line will give an error
@@ -181,48 +208,130 @@ void setup()
   // myMCP.setSPIClockSpeed(8000000); // Choose SPI clock speed (after Init()!)
   delay(wT);
   myMCP.setPortMode(0b11111111, A);   // Port A: all pins are OUTPUT - DAC SDN is output
+  myMCP.setPortPullUp(0b11111111, A);  // Port A: Pin 0 - 3 are pulled up
+
   delay(wT);
   myMCP.setPortMode(0b00000000, B);   // Port B: all pins are INPUT - Buttons are inputs
   myMCP.setPortPullUp(0b11111111, B);  // Port B: Pin 4 - 7 are pulled up
 
   delay(wT);
-  myMCP.setAllPins(A, LOW);            // Port A: all pins are LOW - DACs activated (or deactivated?)
+  myMCP.setAllPins(A, HIGH);            // Port A: all pins are LOW - all DAC amplifiers activated 
+
+
+
+  //setup DAC
+    SPI.beginTransaction(SPISettings(48000000, MSBFIRST, SPI_MODE1));
+    digitalWrite(DAC_CS, HIGH);
+    for (int f=0;f<10;++f) {
+for (j=0;j<70;++j) {
+  for (i=0;i<8;++i)
+  {
+    DAC8568SetVoltage(i,1000*j);
+    //Serial.println(1000*j);
+  }
+    delay(2);
+}
+
+for (j=70;j>0;--j) {
+  for (i=0;i<8;++i)
+  {
+    DAC8568SetVoltage(i,1000*j);
+    //Serial.println(1000*j);
+  }
+    delay(2);
+   
+}
+    }
+ 
+  
+ SPI.endTransaction();
+digitalWrite(DAC_CS, LOW);
+
+
+//check for ADC
+  if (!mcp.begin()) {
+    Serial.println("failed to initialize MCP");
+    while (1)    ;
+  }
+  delay(500);
+  Serial.println("MCP setup done");
 }
 
 void loop()
 {
   unsigned int i;
   unsigned int j;
-  networkManager.loop();
+
+//ADC
+
+int32_t adcdata4 = mcp.analogRead(MCP_CH4);
+  delay(100);
+  
+
+
+int32_t adcdata5 = mcp.analogRead(MCP_CH5);
+  delay(100);
+int32_t adcdata6 = mcp.analogRead(MCP_CH6);
+  delay(100);
+int32_t adcdata7 = mcp.analogRead(MCP_CH7);
+  delay(100);
+// Convert the analog reading
+
+    double voltage4 = adcdata4 * mcp.getReference() / mcp.getMaxValue();
+    double voltage5 = adcdata5 * mcp.getReference() / mcp.getMaxValue();
+    double voltage6 = adcdata6 * mcp.getReference() / mcp.getMaxValue();
+    double voltage7 = adcdata7 * mcp.getReference() / mcp.getMaxValue();
+
+    // print out the value you read:
+  
+
+    Serial.print("voltage4: ");
+    Serial.println(voltage4, 10);
+    
+    Serial.print("voltage5: ");
+    Serial.println(voltage5, 10);
+    
+    Serial.print("voltage6: ");
+    Serial.println(voltage6, 10);
+    Serial.print("voltage7: ");
+    Serial.println(voltage7, 10);
+
+
+//ADC END
+  //networkManager.loop();
   delay(1000);
   buttons = myMCP.getPort( B );
   Serial.print("Buttons: ");
   Serial.println(buttons, BIN);
 
-   u8g2.clearBuffer();					// clear the internal memory
-  u8g2.setFont(u8g2_font_u8glib_4_tf);	// choose a suitable font
-  u8g2.drawStr(0, 5, "Hello,");	 // write something to the internal memory
-  u8g2.drawStr(0, 10, "World…");
-  u8g2.drawStr(0, 15, "I'm tiny…");
-  u8g2.drawStr(0, 20, "So tiny!");
-  u8g2.drawStr(0, 25, "However you can");
-  u8g2.drawStr(0, 30, "have six lines");
-  u8g2.sendBuffer();					// transfer internal memory to the display
   
+
+
+
+//DAC 3x Dreieck output 
+
   SPI.beginTransaction(SPISettings(48000000, MSBFIRST, SPI_MODE1));
-    digitalWrite(DAC_CS, HIGH);
-for (j=0;j<8;++j) {
+  for (int f=0;f<3;++f) {
+for (j=0;j<70;++j) {
   for (i=0;i<8;++i)
   {
-    DAC8568SetVoltage(i,500*j);
+    DAC8568SetVoltage(i,1000*j);
   }
-    delay(500);
-
+    delay(2);
 }
-    SPI.endTransaction();
 
-  digitalWrite(DAC_CS, LOW);
+for (j=70;j>0;--j) {
+  for (i=0;i<8;++i)
+  {
+    DAC8568SetVoltage(i,1000*j);
+  }
+    delay(2);
+   
+}
+  }
+  SPI.endTransaction();
 
+  
 
 
 
